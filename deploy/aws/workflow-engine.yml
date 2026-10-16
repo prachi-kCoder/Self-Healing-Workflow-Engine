@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Starter deployment for the Self-Healing Workflow Engine on ECS Fargate and RDS PostgreSQL.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: workflow-engine
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9-]{2,24}'
+  ImageTag:
+    Type: String
+    Default: bootstrap
+    AllowedPattern: '[a-zA-Z0-9_.-]{1,64}'
+  DesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 10
+    Description: Keep at zero for bootstrap; set to one after images are pushed and database migrations finish.
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: Optional ACM certificate ARN in this region. Without it, the starter load balancer uses HTTP.
+  AllowedIngressCidr:
+    Type: String
+    Description: Restrict the public load balancer to your source IP range, for example 203.0.113.8/32.
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-vpc'}]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.42.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-public-a'}]
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.42.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-public-b'}]
+  PublicSubnetAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable}
+  PublicSubnetAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRouteTable}
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.42.11.0/24
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-private-a'}]
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.42.12.0/24
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-private-b'}]
+
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: true
+      RepositoryName: !Sub '${ProjectName}-backend'
+      ImageScanningConfiguration: {ScanOnPush: true}
+      EncryptionConfiguration: {EncryptionType: AES256}
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Keep the latest five images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: true
+      RepositoryName: !Sub '${ProjectName}-frontend'
+      ImageScanningConfiguration: {ScanOnPush: true}
+      EncryptionConfiguration: {EncryptionType: AES256}
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Keep the latest five images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
+  DatabaseCredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Generated workflow database password.
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"workflow"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL ingress from workflow tasks only.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt TaskSecurityGroup.GroupId
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for workflow PostgreSQL.
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+  WorkflowDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: postgres
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: workflow
+      MasterUsername: workflow
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:password}}'
+      Port: 5432
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups: [!GetAtt DatabaseSecurityGroup.GroupId]
+      BackupRetentionPeriod: 1
+      MultiAZ: false
+      DeletionProtection: false
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTP and optional HTTPS ingress.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedIngressCidr}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref AllowedIngressCidr}
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Workflow tasks accept web traffic only from the load balancer.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+
+  WorkflowCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      ClusterSettings:
+        - {Name: containerInsights, Value: enabled}
+  WorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}'
+      RetentionInDays: 14
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyName: ReadWorkflowDatabaseSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseCredentials
+
+  WorkflowWebTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-web'
+      Cpu: '1024'
+      Memory: '2048'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform: {OperatingSystemFamily: LINUX, CpuArchitecture: X86_64}
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: api
+          Image: !Sub '${BackendRepository.RepositoryUri}:${ImageTag}'
+          Essential: true
+          PortMappings: [{ContainerPort: 8000, Protocol: tcp}]
+          Environment:
+            - {Name: DB_HOST, Value: !GetAtt WorkflowDatabase.Endpoint.Address}
+            - {Name: DB_PORT, Value: '5432'}
+            - {Name: DB_NAME, Value: workflow}
+            - {Name: DB_USER, Value: workflow}
+            - {Name: ENVIRONMENT, Value: production}
+            - {Name: API_PORT, Value: '8000'}
+            - {Name: WORKER_CONCURRENCY, Value: '4'}
+            - {Name: POLL_INTERVAL_SECONDS, Value: '0.5'}
+            - {Name: LEASE_SECONDS, Value: '15'}
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DatabaseCredentials}:password::'
+          HealthCheck:
+            Command: [CMD-SHELL, "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)\" || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+        - Name: frontend
+          Image: !Sub '${FrontendRepository.RepositoryUri}:${ImageTag}'
+          Essential: true
+          DependsOn: [{ContainerName: api, Condition: HEALTHY}]
+          PortMappings: [{ContainerPort: 8080, Protocol: tcp}]
+          Environment: [{Name: API_UPSTREAM, Value: '127.0.0.1:8000'}]
+          HealthCheck:
+            Command: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:8080/health/ui || exit 1']
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  MigrationTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-migration'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform: {OperatingSystemFamily: LINUX, CpuArchitecture: X86_64}
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: migrate
+          Image: !Sub '${BackendRepository.RepositoryUri}:${ImageTag}'
+          Essential: true
+          Command: [python, -m, alembic, upgrade, head]
+          Environment:
+            - {Name: DB_HOST, Value: !GetAtt WorkflowDatabase.Endpoint.Address}
+            - {Name: DB_PORT, Value: '5432'}
+            - {Name: DB_NAME, Value: workflow}
+            - {Name: DB_USER, Value: workflow}
+            - {Name: ENVIRONMENT, Value: production}
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DatabaseCredentials}:password::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: migration
+
+  SchedulerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-scheduler'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform: {OperatingSystemFamily: LINUX, CpuArchitecture: X86_64}
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: scheduler
+          Image: !Sub '${BackendRepository.RepositoryUri}:${ImageTag}'
+          Essential: true
+          Command: [python, -m, backend.app, scheduler]
+          Environment:
+            - {Name: DB_HOST, Value: !GetAtt WorkflowDatabase.Endpoint.Address}
+            - {Name: DB_PORT, Value: '5432'}
+            - {Name: DB_NAME, Value: workflow}
+            - {Name: DB_USER, Value: workflow}
+            - {Name: ENVIRONMENT, Value: production}
+            - {Name: POLL_INTERVAL_SECONDS, Value: '0.5'}
+            - {Name: LEASE_SECONDS, Value: '15'}
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DatabaseCredentials}:password::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: scheduler
+  WorkerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-worker'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform: {OperatingSystemFamily: LINUX, CpuArchitecture: X86_64}
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub '${BackendRepository.RepositoryUri}:${ImageTag}'
+          Essential: true
+          Command: [python, -m, backend.app, worker]
+          Environment:
+            - {Name: DB_HOST, Value: !GetAtt WorkflowDatabase.Endpoint.Address}
+            - {Name: DB_PORT, Value: '5432'}
+            - {Name: DB_NAME, Value: workflow}
+            - {Name: DB_USER, Value: workflow}
+            - {Name: ENVIRONMENT, Value: production}
+            - {Name: WORKER_CONCURRENCY, Value: '4'}
+            - {Name: POLL_INTERVAL_SECONDS, Value: '0.5'}
+            - {Name: LEASE_SECONDS, Value: '15'}
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DatabaseCredentials}:password::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups: [!GetAtt LoadBalancerSecurityGroup.GroupId]
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Port: 8080
+      Protocol: HTTP
+      HealthCheckPath: /health/ready
+      HealthCheckProtocol: HTTP
+      Matcher: {HttpCode: '200'}
+      TargetGroupAttributes:
+        - {Key: deregistration_delay.timeout_seconds, Value: '30'}
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasCertificate
+          - Type: redirect
+            RedirectConfig: {Protocol: HTTPS, Port: '443', StatusCode: HTTP_301}
+          - Type: forward
+            TargetGroupArn: !Ref WebTargetGroup
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates: [{CertificateArn: !Ref CertificateArn}]
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref WebTargetGroup}]
+
+  WebService:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpListener, WorkflowDatabase]
+    Properties:
+      ServiceName: !Sub '${ProjectName}-web'
+      Cluster: !Ref WorkflowCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref WorkflowWebTask
+      DeploymentConfiguration: {MinimumHealthyPercent: 100, MaximumPercent: 200}
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!GetAtt TaskSecurityGroup.GroupId]
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 8080
+          TargetGroupArn: !Ref WebTargetGroup
+  SchedulerService:
+    Type: AWS::ECS::Service
+    DependsOn: [WebService]
+    Properties:
+      ServiceName: !Sub '${ProjectName}-scheduler'
+      Cluster: !Ref WorkflowCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref SchedulerTask
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!GetAtt TaskSecurityGroup.GroupId]
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+  WorkerService:
+    Type: AWS::ECS::Service
+    DependsOn: [WebService]
+    Properties:
+      ServiceName: !Sub '${ProjectName}-worker'
+      Cluster: !Ref WorkflowCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref WorkerTask
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!GetAtt TaskSecurityGroup.GroupId]
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+
+Outputs:
+  ApplicationUrl:
+    Description: HTTPS when a certificate was supplied, otherwise starter HTTP.
+    Value: !If [HasCertificate, !Sub 'https://${ApplicationLoadBalancer.DNSName}', !Sub 'http://${ApplicationLoadBalancer.DNSName}']
+  ClusterName:
+    Value: !Ref WorkflowCluster
+  BackendRepositoryUri:
+    Value: !GetAtt BackendRepository.RepositoryUri
+  FrontendRepositoryUri:
+    Value: !GetAtt FrontendRepository.RepositoryUri
+  ApiTaskDefinitionArn:
+    Value: !Ref WorkflowWebTask
+  MigrationTaskDefinitionArn:
+    Value: !Ref MigrationTask
+  MigrationNetworkConfiguration:
+    Value: !Sub '{"awsvpcConfiguration":{"subnets":["${PublicSubnetA}","${PublicSubnetB}"],"securityGroups":["${TaskSecurityGroup}"],"assignPublicIp":"ENABLED"}}'
