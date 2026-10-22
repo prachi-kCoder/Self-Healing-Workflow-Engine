@@ -1,4 +1,13 @@
 # Self-Healing Distributed Workflow Engine
+- work under progress :
+- 1) <img width="316" height="394" alt="image" src="https://github.com/user-attachments/assets/41794550-1e26-4354-8795-c5f2dfa29108" />
+- 2) <img width="314" height="394" alt="image" src="https://github.com/user-attachments/assets/c7234282-75da-4619-94ec-1f8790d3a159" />
+- 3) <img width="308" height="430" alt="image" src="https://github.com/user-attachments/assets/d57ccdf8-6f91-4437-a151-5505ee9d39fd" />
+- 4) <img width="311" height="400" alt="image" src="https://github.com/user-attachments/assets/6d100bf3-e7c7-47b8-b2d9-1b14e73f333d" />
+- 5) <img width="313" height="377" alt="image" src="https://github.com/user-attachments/assets/c2b0c248-0124-4f3f-96dc-2758f4769988" />
+
+
+
 
 A reusable, database-backed DAG workflow engine. Define workflows as JSON, choose from allowlisted task handlers, save versions, execute multiple isolated runs, and inspect persisted attempts and events. The React app includes a dynamic control plane, JSON Workflow Builder, and evidence-based Demo & Reliability Lab.
 
