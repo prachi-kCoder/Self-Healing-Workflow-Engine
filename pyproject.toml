@@ -1,0 +1,38 @@
+[project]
+name = "self-healing-workflow-engine"
+version = "0.1.0"
+description = "Educational durable workflow orchestration engine"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.2",
+    "sqlalchemy[asyncio]==2.0.41",
+    "asyncpg==0.30.0",
+    "aiosqlite==0.21.0",
+    "pydantic==2.11.5",
+    "alembic==1.16.1",
+    "prometheus-client==0.22.1"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.0",
+    "pytest-asyncio==1.0.0",
+    "httpx==0.28.1",
+    "ruff==0.11.13"
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["backend"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

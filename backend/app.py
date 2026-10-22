@@ -98,6 +98,10 @@ async def database_error_handler(request, exc: SQLAlchemyError):
     return JSONResponse(status_code=503, content={"detail": "Database unavailable or schema is not migrated"})
 
 
+@app.get("/")
+def root():
+    return {"message": "Hello"}
+
 @app.get("/health/live")
 async def liveness():
     return {"status": "alive"}
