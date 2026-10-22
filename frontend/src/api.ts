@@ -1,4 +1,6 @@
-const API_BASE = '/api/v1';
+// const API_BASE = '/api/v1';
+const API_BASE =
+  `${(import.meta as ImportMeta & { env: { VITE_API_URL: string } }).env.VITE_API_URL}/api/v1`;
 
 export type Health = { status: string; database: string };
 export type WorkflowSummary = { id: string; name: string; description: string; version: number; created_at: string };

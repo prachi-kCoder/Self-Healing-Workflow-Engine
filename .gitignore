@@ -16,3 +16,4 @@ frontend/dist/
 frontend/.vite/
 frontend/*.tsbuildinfo
 build/
+frontend/.env.production
