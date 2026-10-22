@@ -104,6 +104,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Self-Healing Distributed Workflow Engine", version="0.2.0", lifespan=lifespan)
 router = APIRouter()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://self-healing-workflow-engine.vercel.app/"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.exception_handler(SQLAlchemyError)
 async def database_error_handler(request, exc: SQLAlchemyError):
