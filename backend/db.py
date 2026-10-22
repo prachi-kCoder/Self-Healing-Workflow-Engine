@@ -25,8 +25,6 @@ def database_url_from_environment() -> str:
 
 
 DATABASE_URL = database_url_from_environment()
-print("HERE -----------> DATABASE_URL =", DATABASE_URL, "***************")
-
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -80,6 +78,9 @@ class Task(Base):
     retry_base_seconds: Mapped[float] = mapped_column(default=1)
     retry_policy: Mapped[str] = mapped_column(String(20), default="exponential")
     max_retry_delay_seconds: Mapped[float] = mapped_column(default=300)
+    retry_on: Mapped[list] = mapped_column(JSON, default=lambda: ["RETRYABLE", "TIMEOUT", "LEASE_EXPIRED"])
+    compensation_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    compensation_input: Mapped[dict] = mapped_column(JSON, default=dict)
     error_classification: Mapped[str | None] = mapped_column(String(20), nullable=True)
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -113,6 +114,38 @@ class Event(Base):
     task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(80), index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class SagaCompensation(Base):
+    __tablename__ = "saga_compensations"
+    __table_args__ = (UniqueConstraint("task_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id"), index=True)
+    task_key: Mapped[str] = mapped_column(String(100))
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    handler_type: Mapped[str] = mapped_column(String(120))
+    input: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DeadLetter(Base):
+    __tablename__ = "dead_letter_tasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id"), index=True)
+    task_key: Mapped[str] = mapped_column(String(100))
+    error: Mapped[str] = mapped_column(Text)
+    error_classification: Mapped[str] = mapped_column(String(20))
+    attempt_count: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 

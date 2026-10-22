@@ -45,6 +45,12 @@ def transition(current: TaskStatus, target: TaskStatus) -> None:
         raise ValueError(f"Illegal task transition: {current} -> {target}")
 
 
+class CompensationSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str = Field(min_length=1, max_length=120)
+    input: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_.-]+$")
@@ -56,6 +62,10 @@ class TaskSpec(BaseModel):
     retry_base_seconds: float = Field(default=1, ge=0, le=3600)
     retry_policy: Literal["exponential", "fixed"] = "exponential"
     max_retry_delay_seconds: float = Field(default=300, ge=0, le=3600)
+    retry_on: list[Literal["RETRYABLE", "TIMEOUT", "LEASE_EXPIRED"]] = Field(
+        default_factory=lambda: ["RETRYABLE", "TIMEOUT", "LEASE_EXPIRED"], max_length=3
+    )
+    compensation: CompensationSpec | None = None
 
 
 class WorkflowSpec(BaseModel):
@@ -80,6 +90,8 @@ class WorkflowSpec(BaseModel):
         by_key = {task.key: task for task in self.tasks}
         if len(by_key) != len(self.tasks):
             raise ValueError("Task keys must be unique")
+        if any(len(set(task.retry_on)) != len(task.retry_on) for task in self.tasks):
+            raise ValueError("retry_on entries must be unique")
         children: dict[str, list[str]] = defaultdict(list)
         degree = {key: 0 for key in by_key}
         for task in self.tasks:

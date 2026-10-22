@@ -49,6 +49,11 @@ class FailureInput(StrictInput):
     message: str = Field(default="Configured retryable failure", max_length=500)
 
 
+class CompensationInput(StrictInput):
+    action: str = Field(min_length=1, max_length=200)
+    resource: str = Field(default="", max_length=200)
+
+
 class PaymentInput(StrictInput):
     operation_key: str | None = Field(default=None, max_length=200)
     amount: float = Field(default=42, ge=0, le=1_000_000)
@@ -237,6 +242,11 @@ async def permanent_failure(data: dict[str, Any], context: dict) -> dict:
     raise PermanentTaskError(str(data.get("message", "Configured permanent failure")))
 
 
+@register("demo.compensate", "Record a simulated saga compensation action.", CompensationInput)
+async def compensate(data: dict[str, Any], context: dict) -> dict:
+    return {"action": data["action"], "resource": data.get("resource", ""), "completed": True}
+
+
 @register("demo.validate_order", "Validate a sample order.", ValidateOrderInput)
 async def validate_order(data: dict[str, Any], context: dict) -> dict:
     await asyncio.sleep(data.get("delay", 0.05))
@@ -306,6 +316,7 @@ OUTPUT_SCHEMAS = {
     "demo.fail_once": {"type": "object", "properties": {"succeeded_after": {"type": "integer"}}},
     "demo.fail_n_times": {"type": "object", "properties": {"succeeded_after": {"type": "integer"}}},
     "demo.permanent_failure": {"type": "never", "description": "Raises PermanentTaskError on every attempt."},
+    "demo.compensate": {"type": "object", "properties": {"action": {"type": "string"}, "resource": {"type": "string"}, "completed": {"type": "boolean"}}},
     "demo.validate_order": {"type": "object", "properties": {"valid": {"type": "boolean"}, "order_id": {"type": "string"}}},
     "demo.check_inventory": {"type": "object", "properties": {"available": {"type": "boolean"}, "sku": {"type": "string"}}},
     "demo.process_payment": {"type": "object", "properties": {"payment_id": {"type": "string"}, "charged": {"type": "number"}}},
@@ -317,6 +328,7 @@ OUTPUT_REQUIRED = {
     "demo.summarize_data": ["count", "sum", "average", "min", "max"],
     "demo.http_simulation": ["url", "status_code", "ok"],
     "demo.fail_once": ["succeeded_after"], "demo.fail_n_times": ["succeeded_after"],
+    "demo.compensate": ["action", "resource", "completed"],
     "demo.validate_order": ["valid", "order_id"],
     "demo.check_inventory": ["available", "sku"],
     "demo.process_payment": ["payment_id", "charged"],

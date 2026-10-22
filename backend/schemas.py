@@ -84,6 +84,9 @@ class TaskResponse(BaseModel):
     retry_policy: str = "exponential"
     retry_base_seconds: float = 1
     max_retry_delay_seconds: float = 300
+    retry_on: list[str] = Field(default_factory=lambda: ["RETRYABLE", "TIMEOUT", "LEASE_EXPIRED"])
+    compensation_type: str | None = None
+    compensation_input: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunResponse(BaseModel):
@@ -101,4 +104,5 @@ class RunResponse(BaseModel):
     tasks: list[TaskResponse]
     attempts: list[AttemptResponse]
     events: list[EventResponse]
+    compensations: list[dict[str, Any]] = Field(default_factory=list)
 

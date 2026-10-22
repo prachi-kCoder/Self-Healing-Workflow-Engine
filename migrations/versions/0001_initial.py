@@ -15,9 +15,12 @@ def upgrade():
     # when that migration adds them.
     baseline = MetaData()
     for table in Base.metadata.sorted_tables:
+        if table.name in {"saga_compensations", "dead_letter_tasks"}:
+            continue
         copied = table.to_metadata(baseline)
         if table.name == "task_runs":
-            for name in ("retry_policy", "max_retry_delay_seconds", "error_classification"):
+            for name in ("retry_policy", "max_retry_delay_seconds", "error_classification",
+                         "retry_on", "compensation_type", "compensation_input"):
                 copied._columns.remove(copied.columns[name])
         elif table.name == "task_attempts":
             copied._columns.remove(copied.columns["error_classification"])

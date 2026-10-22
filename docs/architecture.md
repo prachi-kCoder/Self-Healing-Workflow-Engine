@@ -10,6 +10,12 @@ flowchart LR
   Registry --> Ledger[(Idempotency ledger)]
   API --> SSE[Database-backed event stream]
   SSE --> Browser
+  Scheduler --> Saga[Reverse-order compensation queue]
+  Scheduler --> DLQ[Persistent dead-letter queue]
+  DLQ --> Browser
+  Scheduler --> Saga[Reverse-order compensation queue]
+  Scheduler --> DLQ[Persistent dead-letter queue]
+  DLQ --> Browser
 ```
 
 Workflow JSON is parsed and size-bounded, validated as a DAG, and checked against the handler registry's Pydantic input model. A saved definition is immutable in practice: editing creates a new row/version, and each run stores a JSON snapshot. Task rows copy the run-specific configuration, so old runs do not change when a later version is created.

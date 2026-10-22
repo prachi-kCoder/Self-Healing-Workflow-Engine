@@ -6,14 +6,15 @@ export type Workflow = WorkflowSummary & { definition: {
   name: string; description?: string; metadata?: Record<string, unknown>;
   tasks: { key: string; type: string; input: Record<string, unknown>; depends_on: string[];
     timeout_seconds?: number; max_attempts?: number; retry_base_seconds?: number;
-    retry_policy?: string; max_retry_delay_seconds?: number }[];
+    retry_policy?: string; max_retry_delay_seconds?: number; retry_on?: string[];
+    compensation?: { type: string; input: Record<string, unknown> } }[];
 } };
 export type HandlerInfo = { type: string; description: string; input_schema: Record<string, unknown>; output_schema: Record<string, unknown> };
 export type LabScenario = { id: string; name: string; description: string; expected: string; requires?: string; manual: boolean };
 export type LabRun = { id: string; status: string };
 export type Dashboard = {
   workflow_count: number; run_count: number; active_runs: number; completed_runs: number; failed_runs: number;
-  task_count: number; attempt_count: number; event_count: number;
+  task_count: number; attempt_count: number; event_count: number; dead_letter_count: number;
   recent_runs: { id: string; status: string; workflow_name: string; version: number; created_at: string }[];
 };
 export type Attempt = {
@@ -28,6 +29,7 @@ export type Task = {
   lease_expires_at?: string | null; finished_at: string | null; duration_seconds: number | null; error: string | null;
   error_classification?: string | null; retry_policy?: string; retry_base_seconds?: number;
   max_retry_delay_seconds?: number;
+  retry_on?: string[]; compensation_type?: string | null;
 };
 export type Event = { id: string; run_id: string; task_id: string | null; event_type: string; payload: Record<string, unknown>; created_at: string };
 export type Run = {
@@ -35,7 +37,11 @@ export type Run = {
   created_at: string; started_at: string | null; finished_at: string | null; cancel_requested: boolean;
   definition_snapshot: { name: string; tasks: { key: string; depends_on: string[] }[] };
   tasks: Task[]; attempts: Attempt[]; events: Event[];
+  compensations?: { id: string; task_id: string; task_key: string; handler_type: string;
+    status: string; attempt_count: number; output: Record<string, unknown>; error: string | null }[];
 };
+export type DeadLetter = { id: string; run_id: string; task_id: string; task_key: string;
+  error: string; error_classification: string; attempt_count: number; created_at: string };
 
 export class ApiError extends Error {
   constructor(message: string, readonly status?: number, readonly kind: 'http' | 'network' | 'timeout' = 'http') {
@@ -95,6 +101,12 @@ export const api = {
   duplicateWorkflow: (id: string, name?: string) => request<WorkflowSummary>(`/workflows/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: JSON.stringify(name ? { name } : {}) }),
   startRun: (workflowId: string) => request<{ id: string; status: string; definition_id: string }>(`/workflows/${encodeURIComponent(workflowId)}/runs`, { method: 'POST', body: JSON.stringify({ input: { source: 'dashboard-preview' } }) }),
   run: (runId: string) => request<Run>(`/runs/${encodeURIComponent(runId)}`),
+  deadLetters: () => request<DeadLetter[]>('/dead-letters'),
   cancelRun: (runId: string) => request<{ id: string; status: string; cancel_requested: boolean }>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   retryTask: (taskId: string) => request<{ task_id: string; status: string; run_status: string }>(`/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' }),
 };
+
+export function runSocketUrl(runId: string): string {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}${API_BASE}/runs/${encodeURIComponent(runId)}/ws`;
+}

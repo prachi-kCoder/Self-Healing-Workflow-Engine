@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import React from 'react';
 import ReactFlow, { Background, Controls, Edge, Node } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { ApiError, api, Run, Task, WorkflowSummary } from './api';
+import { ApiError, api, Run, runSocketUrl, Task, WorkflowSummary } from './api';
 
 const demoDefinition = {
   name: 'order-processing',
@@ -45,14 +45,51 @@ export default function App() {
   const [compareIds, setCompareIds] = React.useState<string[]>([]);
   const health = useQuery({ queryKey: ['api-health'], queryFn: api.health, retry: false, refetchInterval: 5000 });
   const dashboard = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard, refetchInterval: 5000, retry: false });
+  const deadLetters = useQuery({ queryKey: ['dead-letters'], queryFn: api.deadLetters,
+    enabled: (dashboard.data?.dead_letter_count ?? 0) > 0, refetchInterval: 5000, retry: false });
   const workflowsQuery = useQuery({ queryKey: ['workflows'], queryFn: api.workflows, retry: false });
   const comparison = useQuery({ queryKey: ['run-comparison', compareIds],
     queryFn: () => api.compareRuns(compareIds[0], compareIds[1]), enabled: compareIds.length === 2, retry: false });
   const runQuery = useQuery<Run>({
     queryKey: ['run', runId], queryFn: () => api.run(runId), enabled: !!runId,
     retry: false,
-    refetchInterval: query => ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(query.state.data?.status ?? '') ? false : 1000,
   });
+  const [liveStatus, setLiveStatus] = React.useState<'connecting' | 'connected' | 'reconnecting' | 'offline' | 'complete'>('offline');
+  React.useEffect(() => {
+    if (!runId || typeof WebSocket === 'undefined') { setLiveStatus('offline'); return; }
+    let socket: WebSocket | undefined;
+    let timer = 0;
+    let stopped = false;
+    let delay = 500;
+    const connect = () => {
+      if (stopped) return;
+      setLiveStatus(delay === 500 ? 'connecting' : 'reconnecting');
+      socket = new WebSocket(runSocketUrl(runId));
+      socket.onopen = () => { delay = 500; setLiveStatus('connected'); };
+      socket.onmessage = message => {
+        try {
+          const snapshot = JSON.parse(message.data) as Run & { error?: string };
+          if (!snapshot.error) {
+            client.setQueryData(['run', runId], snapshot);
+            if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(snapshot.status)) {
+              stopped = true;
+              setLiveStatus('complete');
+              socket?.close();
+            }
+          }
+        } catch { /* Ignore malformed frames and keep the connection alive. */ }
+      };
+      socket.onclose = () => {
+        if (stopped) return;
+        setLiveStatus('reconnecting');
+        timer = window.setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 10000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connect();
+    return () => { stopped = true; window.clearTimeout(timer); socket?.close(); };
+  }, [runId, client]);
   const run = runQuery.data;
   const tasks = run?.tasks ?? [];
   const attempts = run?.attempts ?? [];
@@ -162,6 +199,7 @@ export default function App() {
         <Metric label="TOTAL TASKS" value={dashboard.data.task_count}/>
         <Metric label="ATTEMPTS" value={dashboard.data.attempt_count}/>
         <Metric label="EVENTS" value={dashboard.data.event_count}/>
+        <Metric label="DEAD LETTERS" value={dashboard.data.dead_letter_count}/>
       </> : <div className="muted">{dashboard.isLoading ? 'Loading persisted engine statistics…' : `Dashboard statistics unavailable: ${errorMessage(dashboard.error)}`}</div>}
     </section>
     <section className="panel workflow-launch">
@@ -177,6 +215,16 @@ export default function App() {
       {comparison.data && <div className="comparison"><h3>Run comparison</h3><p>{comparison.data.left.status} vs {comparison.data.right.status} · same definition version</p><div className="comparison-grid"><b>Task</b><b>Left: attempts / duration</b><b>Right: attempts / duration</b>{comparison.data.tasks.map(task => <React.Fragment key={task.key}><span>{task.key}</span><span>{task.left_attempts} / {task.left_duration_seconds?.toFixed(2) ?? '—'}s · {task.left_status}</span><span>{task.right_attempts} / {task.right_duration_seconds?.toFixed(2) ?? '—'}s · {task.right_status}</span></React.Fragment>)}</div></div>}
       {comparison.isError && <div className="notice error">Runs cannot be compared: {errorMessage(comparison.error)}</div>}
     </section> : null}
+    {(dashboard.data?.dead_letter_count ?? 0) > 0 && <section className="panel dead-letter-panel" role="alert">
+      <div className="section-title"><div><small>OPERATOR ACTION</small><h2>Critical task failures</h2></div>
+        <span className="badge failed">{dashboard.data?.dead_letter_count} in dead letter queue</span></div>
+      <p>These tasks exhausted their retry policy or could not be compensated. Review the error and inspect its run.</p>
+      {(deadLetters.data ?? []).slice(0, 10).map(item => <div className="dead-letter-row" key={item.id}>
+        <b>{item.task_key}</b><span className={`badge ${item.error_classification.toLowerCase()}`}>{item.error_classification}</span>
+        <small>{item.attempt_count} attempts · {item.error}</small>
+        <button onClick={() => void inspectRunId(item.run_id)}>Inspect run</button></div>)}
+      {deadLetters.isError && <div className="notice error">Could not load dead letters: {errorMessage(deadLetters.error)}</div>}
+    </section>}
     <form className="lookup panel" onSubmit={inspectRun}>
       <label htmlFor="run-id">Inspect a run</label>
       <div className="actions"><input id="run-id" value={runIdInput} onChange={event => setRunIdInput(event.target.value)} placeholder="Paste a run ID"/>
@@ -193,7 +241,8 @@ export default function App() {
     </section>}
     {run && <div className="muted run-version">{run.definition_snapshot.name} · definition version {run.definition_version} · run {run.id}</div>}
     <section className="panel"><div className="section-title"><div><small>DEPENDENCY GRAPH</small><h2>Execution topology</h2></div>
-      <span>{run ? (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(run.status) ? 'Run complete' : 'Refreshes every second') : 'Select or start a workflow run'}</span></div>
+      <span>{run ? (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(run.status) ? 'Run complete' : `Live updates ${liveStatus}`) : 'Select or start a workflow run'}</span>
+      {run && <button onClick={() => void runQuery.refetch()} disabled={runQuery.isFetching}>Refresh run</button>}</div>
       <div className="flow">{tasks.length ? <ReactFlow nodes={nodes} edges={edges} fitView fitViewOptions={{ padding: 0.25 }}><Background color="#27364a"/><Controls/></ReactFlow>
         : <div className="empty"><strong>{runQuery.isLoading ? 'Loading run…' : runQuery.isError ? 'Run unavailable' : 'No run selected'}</strong><p>Start the sample above or enter an existing run ID.</p></div>}</div>
     </section>
@@ -204,13 +253,17 @@ export default function App() {
         <div className="task-meta"><span>{task.attempt_count} attempt{task.attempt_count === 1 ? '' : 's'}</span><span>{task.duration_seconds == null ? 'Duration pending' : `${task.duration_seconds.toFixed(2)}s`}</span><span>{task.started_at ? `Started ${new Date(task.started_at).toLocaleTimeString()}` : 'Not started'}</span><span>{task.finished_at ? `Finished ${new Date(task.finished_at).toLocaleTimeString()}` : 'Not finished'}</span><span>{task.worker_id ? `Worker ${task.worker_id}` : 'No active worker'}</span>
           {task.status === 'FAILED' && <button onClick={() => void retryTask(task)} disabled={!!action}>{action === task.id ? 'Retrying…' : 'Retry task'}</button>}</div>
         {task.error && <p className="task-error">{task.error_classification ?? 'ERROR'}: {task.error}</p>}
-        <small className="task-policy">Timeout {task.retry_policy}; base {task.retry_base_seconds}s; cap {task.max_retry_delay_seconds}s · lease {task.heartbeat_at ? `heartbeat ${new Date(task.heartbeat_at).toLocaleTimeString()}, expires ${task.lease_expires_at ? new Date(task.lease_expires_at).toLocaleTimeString() : 'unknown'}` : 'inactive'}</small>
+        <small className="task-policy">Timeout {task.retry_policy}; retry on {(task.retry_on ?? ['RETRYABLE', 'TIMEOUT', 'LEASE_EXPIRED']).join(', ')} · base {task.retry_base_seconds}s; cap {task.max_retry_delay_seconds}s · lease {task.heartbeat_at ? `heartbeat ${new Date(task.heartbeat_at).toLocaleTimeString()}, expires ${task.lease_expires_at ? new Date(task.lease_expires_at).toLocaleTimeString() : 'unknown'}` : 'inactive'}</small>
         <details><summary>Task input</summary><pre>{JSON.stringify(task.input, null, 2)}</pre></details>
         {attempts.filter(attempt => attempt.task_id === task.id).length > 0 && <details><summary>Attempt history ({attempts.filter(attempt => attempt.task_id === task.id).length})</summary>
           {attempts.filter(attempt => attempt.task_id === task.id).map(attempt => <div className="attempt-row" key={attempt.id}>#{attempt.attempt_number} {attempt.status} · {attempt.worker_id} · {attempt.duration_seconds == null ? 'running' : `${attempt.duration_seconds.toFixed(2)}s`}{attempt.error ? ` · ${attempt.error_classification ?? 'ERROR'}: ${attempt.error}` : ''}</div>)}</details>}
         {Object.keys(task.output).length > 0 && <details><summary>Task output</summary><pre>{JSON.stringify(task.output, null, 2)}</pre></details>}
       </article>)}</div>
     </section>}
+    {run && run.compensations?.length ? <section className="panel"><div className="section-title"><div><small>SAGA ROLLBACK</small><h2>Compensation actions</h2></div><span>{run.compensations.filter(item => item.status === 'SUCCEEDED').length}/{run.compensations.length} completed</span></div>
+      {run.compensations!.map(item => <div className="compensation-row" key={item.id}><b>{item.task_key}</b><span>{item.handler_type}</span><span className={`badge ${item.status.toLowerCase()}`}>{item.status}</span>
+        {item.error && <small className="task-error">{item.error}</small>}{Object.keys(item.output).length > 0 && <small>{JSON.stringify(item.output)}</small>}</div>)}
+    </section> : null}
     <section className="panel"><div className="section-title"><div><small>EVENT JOURNAL</small><h2>Recent execution activity</h2></div><span>Persisted in the API</span></div>
       {events.length ? events.slice(0, 100).map(event => <div className="event" key={event.id}><i/>{event.event_type}<time>{new Date(event.created_at).toLocaleTimeString()}</time></div>)
         : <p className="muted">Events appear here for the inspected run.</p>}
@@ -315,11 +368,48 @@ function WorkflowBuilder({ onInspect }: { onInspect: (id: string) => Promise<voi
     <label className="editor-label" htmlFor="workflow-json">Workflow definition JSON</label>
     <textarea id="workflow-json" className="json-editor" spellCheck={false} value={source} onChange={event => { setSource(event.target.value); setMessage(''); setError(''); }}/>
     {message && <div className="notice success" role="status">{message}</div>}{error && <div className="notice error" role="alert">{error}</div>}
+    <section className="definition-graph-section"><div className="section-title"><div><small>WORKFLOW DAG</small><h3>Visual execution flow</h3></div><span>Preview from the current JSON definition</span></div>
+      <DefinitionGraph source={source}/></section>
     <details className="handler-catalog"><summary>Registered handler types and input schemas ({handlers.data?.length ?? '…'})</summary>
       {(handlers.data ?? []).map(handler => <article key={handler.type}><b>{handler.type}</b><p>{handler.description}</p><small>Input schema</small><pre>{JSON.stringify(handler.input_schema, null, 2)}</pre><small>Output schema</small><pre>{JSON.stringify(handler.output_schema, null, 2)}</pre></article>)}
       {handlers.isError && <p className="task-error">Could not load handler catalog: {errorMessage(handlers.error)}</p>}
     </details>
   </section>;
+}
+
+function DefinitionGraph({ source }: { source: string }) {
+  let definition: { tasks?: { key?: string; type?: string; depends_on?: string[] }[] } = {};
+  try { definition = JSON.parse(source); } catch { /* Show an editor hint while JSON is incomplete. */ }
+  const tasks = Array.isArray(definition.tasks) ? definition.tasks : [];
+  const depth = new Map<string, number>();
+  for (let pass = 0; pass < tasks.length; pass++) {
+    let changed = false;
+    for (const task of tasks) {
+      const key = task.key ?? '';
+      const parents = task.depends_on ?? [];
+      if (!key || depth.has(key) || parents.some(parent => !depth.has(parent))) continue;
+      depth.set(key, parents.length ? Math.max(...parents.map(parent => depth.get(parent) ?? 0)) + 1 : 0);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  const laneCounts = new Map<number, number>();
+  const nodes: Node[] = tasks.filter(task => !!task.key).map((task, index) => {
+    const level = depth.get(task.key!) ?? 0;
+    const lane = laneCounts.get(level) ?? 0;
+    laneCounts.set(level, lane + 1);
+    return { id: task.key!, position: { x: level * 250, y: lane * 110 },
+      data: { label: <div className="node-label"><b>{task.key}</b><small>{task.type}</small></div> },
+      style: { border: '1px solid #46617d', borderRadius: 10, padding: 12, background: '#111c2a', color: '#eef5ff', width: 205 },
+    };
+  });
+  const keys = new Set(tasks.map(task => task.key));
+  const edges: Edge[] = tasks.flatMap(task => (task.depends_on ?? []).filter(parent => keys.has(parent))
+    .map(parent => ({ id: `${parent}-${task.key}`, source: parent, target: task.key! })));
+  return <div className="flow definition-flow">{nodes.length
+    ? <ReactFlow nodes={nodes} edges={edges} fitView fitViewOptions={{ padding: 0.25 }} nodesDraggable={false} nodesConnectable={false}>
+      <Background color="#27364a"/><Controls/></ReactFlow>
+    : <div className="empty"><strong>{source.trim() ? 'No valid tasks to display' : 'Add tasks to preview the DAG'}</strong><p>Each dependency becomes a directed edge.</p></div>}</div>;
 }
 
 function ReliabilityLab({ onInspect }: { onInspect: (id: string) => Promise<void> }) {
