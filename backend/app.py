@@ -110,7 +110,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://self-healing-workflow-engine.vercel.app/"
+        "https://self-healing-workflow-engine.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
