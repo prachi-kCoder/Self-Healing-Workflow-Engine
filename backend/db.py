@@ -3,14 +3,37 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+def normalize_database_url(database_url: str) -> str:
+    """Use the async SQLAlchemy driver for standard PostgreSQL URLs.
+
+    Providers such as Neon give out ``postgresql://`` URLs by default, which
+    SQLAlchemy maps to the synchronous psycopg2 driver. This project uses
+    ``create_async_engine`` and installs asyncpg instead.
+    """
+    url = make_url(database_url)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+asyncpg")
+
+    if url.drivername == "postgresql+asyncpg":
+        query = dict(url.query)
+        sslmode = query.pop("sslmode", None)
+        # These are libpq options and are not asyncpg connect arguments.
+        query.pop("channel_binding", None)
+        if sslmode and "ssl" not in query:
+            query["ssl"] = sslmode
+        url = url.set(query=query)
+
+    return url.render_as_string(hide_password=False)
+
 
 def database_url_from_environment() -> str:
     explicit_url = os.getenv("DATABASE_URL")
     if explicit_url:
-        return explicit_url
+        return normalize_database_url(explicit_url)
     host = os.getenv("DB_HOST")
     if host:
         return URL.create(

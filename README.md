@@ -53,6 +53,14 @@ docker compose up --build -d
 * **API Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
 * **Health Endpoint:** [http://localhost:8000/health/ready](http://localhost:8000/health/ready)
 
+## Using Neon PostgreSQL
+
+The backend uses PostgreSQL through SQLAlchemy's asyncpg driver. Copy the Neon connection URL from the Neon dashboard into `DATABASE_URL` in the local `.env` file. Standard `postgresql://` and `postgres://` URLs are supported; the backend converts them to `postgresql+asyncpg://` and maps Neon TLS options for asyncpg. Keep `.env` out of source control.
+
+For a fresh Neon database, start the stack with `docker compose up --build -d`. Compose runs `alembic upgrade head` before starting the API, scheduler, or worker. Check `http://localhost:8000/health/ready` and `http://localhost:8000/api/v1/dashboard`; readiness should report `database: ready` and the dashboard should return JSON.
+
+For Render, set the same `DATABASE_URL` in the backend service environment and run `alembic upgrade head` as a migration step before the API starts. After deploying, verify `/health/ready` before connecting the Vercel frontend. A Render service's local filesystem is ephemeral, so keep workflow state in Neon PostgreSQL rather than the default local SQLite file.
+
 ---
 
 ## 🧪 Local Development (Without Docker)

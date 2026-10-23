@@ -4,11 +4,11 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
-from backend.db import Base, DATABASE_URL
+from backend.db import Base, DATABASE_URL, normalize_database_url
 
 config = context.config
 fileConfig(config.config_file_name)
-database_url = os.getenv("DATABASE_URL") or DATABASE_URL
+database_url = normalize_database_url(os.getenv("DATABASE_URL") or DATABASE_URL)
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 

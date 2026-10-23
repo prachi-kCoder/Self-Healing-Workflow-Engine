@@ -1,6 +1,6 @@
 from sqlalchemy.engine import make_url
 
-from backend.db import database_url_from_environment
+from backend.db import database_url_from_environment, normalize_database_url
 
 
 def test_explicit_database_url_takes_precedence(monkeypatch):
@@ -8,6 +8,23 @@ def test_explicit_database_url_takes_precedence(monkeypatch):
     monkeypatch.setenv("DB_HOST", "database.internal")
     monkeypatch.setenv("DB_PASSWORD", "unused")
     assert database_url_from_environment() == "sqlite+aiosqlite:///./explicit.db"
+
+
+def test_standard_neon_postgres_url_uses_asyncpg_and_translates_tls_options():
+    url = make_url(normalize_database_url(
+        "postgresql://user:secret@ep-example.neon.tech/app?sslmode=require&channel_binding=require"
+    ))
+
+    assert url.drivername == "postgresql+asyncpg"
+    assert url.host == "ep-example.neon.tech"
+    assert url.password == "secret"
+    assert url.query == {"ssl": "require"}
+
+
+def test_postgres_scheme_alias_uses_asyncpg():
+    url = make_url(normalize_database_url("postgres://user:secret@db.example/app"))
+
+    assert url.drivername == "postgresql+asyncpg"
 
 
 def test_aws_database_environment_builds_escaped_async_postgres_url(monkeypatch):
