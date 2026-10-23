@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -103,19 +104,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Self-Healing Distributed Workflow Engine", version="0.2.0", lifespan=lifespan)
 router = APIRouter()
-
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://self-healing-workflow-engine.vercel.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173,https://self-healing-workflow-engine.vercel.app",
+    ).split(",")
+    if origin.strip()
+]
 
 @app.exception_handler(SQLAlchemyError)
 async def database_error_handler(request, exc: SQLAlchemyError):
@@ -739,6 +735,17 @@ async def legacy_ready():
 # Keep the original routes available for existing scripts while the UI uses the versioned contract.
 app.include_router(router, prefix="/api/v1")
 app.include_router(router, include_in_schema=False)
+
+# Wrap the complete FastAPI app so even unhandled 500 responses include CORS
+# headers. Otherwise the browser masks the server error as a CORS failure.
+app = CORSMiddleware(
+    app,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=os.getenv("CORS_ALLOWED_ORIGIN_REGEX") or None,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 async def schedule_once():
