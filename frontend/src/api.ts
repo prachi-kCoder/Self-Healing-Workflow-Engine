@@ -1,6 +1,6 @@
-// const API_BASE = '/api/v1';
-const API_BASE =
-  `${(import.meta as ImportMeta & { env: { VITE_API_URL: string } }).env.VITE_API_URL}/api/v1`;
+const configuredApiUrl = (import.meta as ImportMeta & { env: { VITE_API_URL?: string } }).env.VITE_API_URL;
+// Strip trailing slashes so an origin ending in `/` does not produce `//api/v1`.
+const API_BASE = `${(configuredApiUrl || '').replace(/\/+$/, '')}/api/v1`;
 
 export type Health = { status: string; database: string };
 export type WorkflowSummary = { id: string; name: string; description: string; version: number; created_at: string };
@@ -109,6 +109,7 @@ export const api = {
 };
 
 export function runSocketUrl(runId: string): string {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.host}${API_BASE}/runs/${encodeURIComponent(runId)}/ws`;
+  const url = new URL(`${API_BASE}/runs/${encodeURIComponent(runId)}/ws`, location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.toString();
 }
